@@ -543,7 +543,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "soonest-reset" (prefer the credential whose observed quota window resets soonest).
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -579,6 +580,11 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// CodexPreferHigherPriority moves Codex sessions back to the highest available
+	// priority tier, so a lower-priority credits account is used only for failover.
+	// Ignored when session affinity is disabled or rebind-on is "never".
+	CodexPreferHigherPriority bool `yaml:"codex-prefer-higher-priority,omitempty" json:"codex-prefer-higher-priority,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

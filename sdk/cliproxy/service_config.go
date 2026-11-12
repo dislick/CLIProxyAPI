@@ -56,11 +56,12 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                 string
-	sessionAffinity          bool
-	sessionAffinityTTL       time.Duration
-	sessionAffinitySubagents bool
-	sessionAffinityRebindOn  string
+	strategy                  string
+	sessionAffinity           bool
+	sessionAffinityTTL        time.Duration
+	sessionAffinitySubagents  bool
+	sessionAffinityRebindOn   string
+	codexPreferHigherPriority bool
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -79,6 +80,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "soonest-reset", "soonestreset":
+		state.strategy = "soonest-reset"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -99,6 +102,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		case coreauth.SessionAffinityRebindOnNever:
 			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnNever
 		}
+		state.codexPreferHigherPriority = cfg.Routing.CodexPreferHigherPriority && state.sessionAffinityRebindOn != coreauth.SessionAffinityRebindOnNever
 	}
 	return state
 }
@@ -118,16 +122,19 @@ func newRoutingSelectorWithExisting(state routingRuntimeState, existing coreauth
 		}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "soonest-reset":
+		selector = &coreauth.SoonestResetSelector{}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback:         selector,
-			TTL:              state.sessionAffinityTTL,
-			SubagentAffinity: &subagents,
-			RebindOn:         state.sessionAffinityRebindOn,
+			Fallback:                  selector,
+			TTL:                       state.sessionAffinityTTL,
+			SubagentAffinity:          &subagents,
+			RebindOn:                  state.sessionAffinityRebindOn,
+			CodexPreferHigherPriority: state.codexPreferHigherPriority,
 		})
 	}
 	return selector
