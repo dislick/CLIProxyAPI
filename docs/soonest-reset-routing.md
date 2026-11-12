@@ -65,8 +65,9 @@ after a previously observed window expires may probe immediately, even if an
 earlier probe happened less than an hour before the reset. Other requests prefer
 known future resets until the next probe is due. Session affinity can retain a
 session assigned during a probe, just as it retains any other assignment.
-Token-count and selection-only requests use known ordering without consuming
-probes or establishing affinity bindings under this strategy.
+Token-count and selection-only requests follow existing affinity bindings, or
+use known ordering on a miss, without consuming probes or creating new bindings
+under this strategy.
 
 Snapshots are kept in memory and learned again after a restart. Disabled,
 unsupported or cooling credentials are never probed. Concurrent selections share

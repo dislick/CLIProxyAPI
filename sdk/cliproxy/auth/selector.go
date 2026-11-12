@@ -1613,11 +1613,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
-	if _, soonestReset := s.fallback.(*SoonestResetSelector); soonestReset && ctx.Value(quotaProbeDisabledKey{}) == true {
-		// A preflight must not pin a new conversation before its first real
-		// request can discover an account's reset. It cannot observe quota.
-		return s.fallback.Pick(ctx, provider, model, opts, auths)
-	}
 	var reservation *weightedReservation
 	// Local bindings complete inside Pick; failed selections release speculative credit.
 	defer func() { reservation.finish(selected != nil && errPick == nil) }()
@@ -1700,6 +1695,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string, recordSelection bool) {
+		if s.skipQuotaPreflightBinding(ctx) {
+			return
+		}
 		keys := []string{cacheKey}
 		if fallbackKey != "" && !isSubagent && !isFork {
 			keys = append(keys, fallbackKey)
@@ -1833,6 +1831,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	return auth, nil
 }
 
+// skipQuotaPreflightBinding preserves existing affinity lookups while leaving
+// new bindings to real requests that can observe quota and discover reset times.
+func (s *SessionAffinitySelector) skipQuotaPreflightBinding(ctx context.Context) bool {
+	_, soonestReset := s.fallback.(*SoonestResetSelector)
+	return soonestReset && ctx != nil && ctx.Value(quotaProbeDisabledKey{}) == true
+}
+
 // preferCodexPriority limits affinity reuse to the best available Codex tier.
 // Other providers keep their normal affinity behaviour, including mixed pools.
 func (s *SessionAffinitySelector) preferCodexPriority(available []*Auth) []*Auth {
@@ -1936,6 +1941,9 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			return picked, true, errPick
 		}
 		if !match.IsFork && s.rebindOnNever {
+			if s.skipQuotaPreflightBinding(ctx) {
+				return nil, true, s.unavailableBoundAuthError(ctx, availabilityCandidates, model, match.AuthID, now)
+			}
 			if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, match.AuthID); bindRes.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
@@ -1978,6 +1986,9 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 	if auth == nil {
 		return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	if s.skipQuotaPreflightBinding(ctx) {
+		return auth, true, nil
 	}
 	bindAuthID := auth.ID
 	if preservedAuthID != "" {
@@ -2283,6 +2294,11 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
 	if s == nil || res.AuthID == "" {
+		return
+	}
+	if _, soonestReset := s.fallback.(*SoonestResetSelector); soonestReset && res.Success && res.SkipQuotaObservation {
+		// Successful token counts must not create an LCP binding before a
+		// request that can observe quota. Failures still invalidate bad bindings.
 		return
 	}
 

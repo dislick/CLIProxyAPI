@@ -13,6 +13,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // soonestResetExecutor succeeds and reports the configured weekly reset for
@@ -48,7 +49,10 @@ func (*soonestResetExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, erro
 	return auth, nil
 }
 
-func (*soonestResetExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *soonestResetExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.pickedN = append(e.pickedN, auth.ID)
+	e.mu.Unlock()
 	return cliproxyexecutor.Response{Payload: []byte("{}")}, nil
 }
 
@@ -193,12 +197,12 @@ func TestManagerSoonestResetLearnsEveryCredentialAfterRestart(t *testing.T) {
 }
 
 func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *testing.T) {
-	for _, selection := range []string{"count", "count-affinity", "select", "kind", "policy"} {
+	for _, selection := range []string{"count", "count-affinity", "count-affinity-lcp", "select", "kind", "policy"} {
 		t.Run(selection, func(t *testing.T) {
 			ids := []string{"soonest-reset-non-observing-a", "soonest-reset-non-observing-b"}
 			executor := &soonestResetExecutor{resets: map[string]time.Duration{ids[0]: 5 * 24 * time.Hour, ids[1]: 2 * 24 * time.Hour}}
 			manager := NewManager(nil, &SoonestResetSelector{}, nil)
-			if selection == "count-affinity" {
+			if selection == "count-affinity" || selection == "count-affinity-lcp" {
 				affinity := NewSessionAffinitySelector(&SoonestResetSelector{})
 				t.Cleanup(affinity.Stop)
 				manager.SetSelector(affinity)
@@ -213,12 +217,19 @@ func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *tes
 				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 			}
 			options := func(session int) cliproxyexecutor.Options {
+				if selection == "count-affinity-lcp" {
+					return cliproxyexecutor.Options{
+						SourceFormat:    sdktranslator.FormatOpenAI,
+						OriginalRequest: []byte(`{"messages":[{"role":"user","content":"preflight-` + strconv.Itoa(session) + `"}]}`),
+						Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "cold-preflight"},
+					}
+				}
 				return cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "preflight-" + strconv.Itoa(session)}}
 			}
 			for i := range 2 {
 				var err error
 				switch selection {
-				case "count", "count-affinity":
+				case "count", "count-affinity", "count-affinity-lcp":
 					_, err = manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, options(i))
 				case "select":
 					_, err = manager.SelectAuth(context.Background(), "codex", model, cliproxyexecutor.Options{})
@@ -241,6 +252,92 @@ func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *tes
 				}
 			}
 		})
+	}
+}
+
+func TestManagerSoonestResetNonObservingSelectionsPreserveExistingBinding(t *testing.T) {
+	for _, lcp := range []bool{false, true} {
+		for _, rebind := range []string{SessionAffinityRebindOnAny, SessionAffinityRebindOnNever} {
+			t.Run(strconv.FormatBool(lcp)+"/"+rebind, func(t *testing.T) {
+				ids := []string{"soonest-reset-bound-a", "soonest-reset-bound-b"}
+				executor := &soonestResetExecutor{resets: map[string]time.Duration{ids[0]: 5 * 24 * time.Hour, ids[1]: 2 * 24 * time.Hour}}
+				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetSelector{}, RebindOn: rebind})
+				t.Cleanup(affinity.Stop)
+				manager := NewManager(nil, affinity, nil)
+				manager.RegisterExecutor(executor)
+				const model = "gpt-soonest-reset-bound"
+				for _, id := range ids {
+					if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"access_token": id}}); err != nil {
+						t.Fatal(err)
+					}
+					registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+				}
+				options := func(session string) cliproxyexecutor.Options {
+					if !lcp {
+						return cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{session}}}
+					}
+					return cliproxyexecutor.Options{
+						SourceFormat:    sdktranslator.FormatOpenAI,
+						OriginalRequest: []byte(`{"messages":[{"role":"user","content":"` + session + `"}]}`),
+						Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "bound-preflight"},
+					}
+				}
+				execute := func(session, want string) {
+					t.Helper()
+					ctx := internallogging.WithResponseHeadersHolder(context.Background())
+					if _, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, options(session)); err != nil {
+						t.Fatal(err)
+					}
+					if got := executor.last(); got != want {
+						t.Fatalf("Execute(%s) picked %s, want %s", session, got, want)
+					}
+				}
+				execute("session-S", ids[0])
+				// The single-provider selection APIs use a separate affinity namespace.
+				// Seed the same binding there while only a has been observed.
+				bound, _ := manager.GetByID(ids[0])
+				if _, err := affinity.Pick(context.Background(), "codex", model, options("session-S"), []*Auth{bound}); err != nil {
+					t.Fatal(err)
+				}
+				execute("session-T", ids[1])
+				execute("session-S", ids[0])
+				for _, selection := range []string{"count", "select", "kind", "policy"} {
+					var selected *Auth
+					var err error
+					switch selection {
+					case "count":
+						_, err = manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, options("session-S"))
+						selected, _ = manager.GetByID(executor.last())
+					case "select":
+						selected, err = manager.SelectAuth(context.Background(), "codex", model, options("session-S"))
+					case "kind":
+						selected, err = manager.SelectAuthByKind(context.Background(), "codex", model, "oauth", options("session-S"))
+					case "policy":
+						selected, err = manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", model, CredentialPolicyCodexAlphaSearchV1, options("session-S"))
+					}
+					if err != nil || selected == nil || selected.ID != ids[0] {
+						got := ""
+						if selected != nil {
+							got = selected.ID
+						}
+						t.Fatalf("%s picked %s, %v; want bound %s", selection, got, err, ids[0])
+					}
+				}
+				if rebind == SessionAffinityRebindOnNever {
+					bound, _ := manager.GetByID(ids[0])
+					other, _ := manager.GetByID(ids[1])
+					bound.Unavailable = true
+					bound.NextRetryAfter = time.Now().Add(time.Hour)
+					bound.Quota.Exceeded = true
+					bound.Quota.Reason = "credential_quota"
+					bound.Quota.NextRecoverAt = bound.NextRetryAfter
+					if _, err := affinity.Pick(withoutQuotaProbe(context.Background()), "codex", model, options("session-S"), []*Auth{bound, other}); err == nil {
+						t.Fatal("preflight failed over an unavailable binding under rebind-on never")
+					}
+				}
+			})
+		}
 	}
 }
 
