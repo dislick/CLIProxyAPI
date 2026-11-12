@@ -52,6 +52,39 @@ strategy and is ignored when affinity is disabled or `session-affinity-rebind-on
 is `never`. Retained WebSocket turns keep their established upstream connection;
 priority takes effect on the next credential selection. Home dispatch is unchanged.
 
+## Reserve allowance for personal use
+
+Set `quota_reserve_percent` on the Business credential through
+`PATCH /v8/management/credentials/fields`:
+
+```json
+{"name":"<business credential ID>","quota_reserve_percent":20}
+```
+
+The field is saved in that credential's auth file. Values from 0 to 100 are
+accepted; missing, null or 0 disables the reserve. Keep the Plus/credits
+credential at 0 (or leave the field absent), and retain Business priority 100
+versus credits priority 0 with `codex-prefer-higher-priority: true`.
+
+Business is eligible while more than 20% remains in every reported current base
+window. At 80% used or higher in either window, it becomes unavailable to proxy
+requests, including existing affinity bindings. Normal fallback selects the
+credits account. When the blocking windows reset, Business becomes eligible
+again. Under `rebind-on: never`, bound requests return an error at the reserve
+instead of moving accounts. The setting applies to Codex credentials with every
+local routing strategy; it does not alter the upstream account's limits.
+
+This is a soft reserve based on passive quota snapshots. Usage observations are
+learned again after a proxy restart. Unknown usage permits discovery; known usage
+at the reserve without a readable reset stays protected until a new observation
+or settings change. In-flight requests and retained upstream WebSocket turns can
+overshoot the threshold. Set a larger reserve if a safety margin is needed.
+Home dispatch is unchanged. The reserve does not restrict direct use in the app.
+
+[OpenAI's pricing documentation](https://developers.openai.com/codex/pricing)
+states that ChatGPT Work and Codex share usage. This reserve protects that shared
+allowance; it is not a guarantee about every ChatGPT feature's separate limits.
+
 ## Observations and rollover
 
 Quota data is collected passively from normal upstream response headers. Routing

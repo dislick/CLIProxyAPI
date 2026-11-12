@@ -1024,6 +1024,9 @@ func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) boo
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true
 	}
+	if _, reserved := codexQuotaReserveBlocks(auth, now); reserved {
+		return true
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return true
 	}
@@ -1105,8 +1108,7 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	meta := buildScheduledAuthMetaWithModelSet(auth, modelSet, currentRegEpoch)
 	s.authProviders[authID] = providerKey
 
-	// Check whether credential-level availability transitioned between blocked and unblocked.
-	// If credential-level availability changed, all model shards must be synchronized.
+	// Credential-level availability and reserve deadlines affect every model shard.
 	modelCount := len(modelSet)
 	wasBlocked := false
 	if existingMeta != nil {
@@ -1114,10 +1116,15 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	}
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
+	if existingMeta != nil {
+		previousRecoverAt, previousReserved := codexQuotaReserveBlocks(existingMeta.auth, now)
+		nextRecoverAt, nextReserved := codexQuotaReserveBlocks(auth, now)
+		credentialAvailabilityChanged = credentialAvailabilityChanged || previousReserved != nextReserved || !previousRecoverAt.Equal(nextRecoverAt)
+	}
 
 	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
-		// or when credential-level availability transitioned.
+		// or when credential-level availability or a reserve deadline changed.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)

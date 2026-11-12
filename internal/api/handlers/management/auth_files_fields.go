@@ -440,6 +440,9 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 		changed = true
 	}
 	if changed {
+		if _, errReserve := coreauth.AuthQuotaReservePercent(targetAuth); errReserve != nil {
+			return &authFileFieldPatchError{message: errReserve.Error()}
+		}
 		syncAuthFileMetadataFields(targetAuth, touchedRoots)
 		if _, touched := touchedRoots["excluded_models"]; touched {
 			excluded, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(targetAuth.Metadata)

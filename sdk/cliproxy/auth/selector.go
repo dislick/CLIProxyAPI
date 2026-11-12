@@ -1259,6 +1259,12 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if recoverAt, reserved := codexQuotaReserveBlocks(auth, now); reserved {
+		if recoverAt.IsZero() {
+			return true, blockReasonOther, time.Time{}
+		}
+		return true, blockReasonCooldown, recoverAt
+	}
 	if codexRefreshMissingAccessForRequest(ctx, auth, clientHeaders...) {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -1459,6 +1465,9 @@ func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Aut
 		return true
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
+		return true
+	}
+	if _, reserved := codexQuotaReserveBlocks(auth, now); reserved {
 		return true
 	}
 	if codexRefreshMissingAccessForRequest(ctx, auth, clientHeaders...) {
