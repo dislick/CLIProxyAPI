@@ -49,7 +49,7 @@ func (*soonestResetExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, erro
 }
 
 func (*soonestResetExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+	return cliproxyexecutor.Response{Payload: []byte("{}")}, nil
 }
 
 func (*soonestResetExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
@@ -189,6 +189,81 @@ func TestManagerSoonestResetLearnsEveryCredentialAfterRestart(t *testing.T) {
 		if picks[i] != want[i] {
 			t.Fatalf("picks = %v, want %v", picks, want)
 		}
+	}
+}
+
+func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *testing.T) {
+	for _, selection := range []string{"count", "count-affinity", "select", "kind", "policy"} {
+		t.Run(selection, func(t *testing.T) {
+			ids := []string{"soonest-reset-non-observing-a", "soonest-reset-non-observing-b"}
+			executor := &soonestResetExecutor{resets: map[string]time.Duration{ids[0]: 5 * 24 * time.Hour, ids[1]: 2 * 24 * time.Hour}}
+			manager := NewManager(nil, &SoonestResetSelector{}, nil)
+			if selection == "count-affinity" {
+				affinity := NewSessionAffinitySelector(&SoonestResetSelector{})
+				t.Cleanup(affinity.Stop)
+				manager.SetSelector(affinity)
+			}
+			manager.RegisterExecutor(executor)
+			model := "gpt-soonest-reset-non-observing"
+			for _, id := range ids {
+				if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"access_token": id}}); err != nil {
+					t.Fatal(err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			}
+			options := func(session int) cliproxyexecutor.Options {
+				return cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "preflight-" + strconv.Itoa(session)}}
+			}
+			for i := range 2 {
+				var err error
+				switch selection {
+				case "count", "count-affinity":
+					_, err = manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, options(i))
+				case "select":
+					_, err = manager.SelectAuth(context.Background(), "codex", model, cliproxyexecutor.Options{})
+				case "kind":
+					_, err = manager.SelectAuthByKind(context.Background(), "codex", model, "oauth", cliproxyexecutor.Options{})
+				case "policy":
+					_, err = manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", model, CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, want := range []string{ids[0], ids[1], ids[1], ids[1]} {
+				ctx := internallogging.WithResponseHeadersHolder(context.Background())
+				if _, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, options(min(i, 1))); err != nil {
+					t.Fatal(err)
+				}
+				if got := executor.last(); got != want {
+					t.Fatalf("execution %d picked %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateKeepsFreshIncomingQuotaAfterAccountReplacement(t *testing.T) {
+	for _, provider := range []string{"devin", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			manager := NewManager(nil, &SoonestResetSelector{}, nil)
+			old := &Auth{ID: "quota-relogin", Provider: provider, Status: StatusActive, Metadata: map[string]any{"access_token": "old"}}
+			old.Quota = QuotaState{ObservedAt: time.Now().Add(-time.Hour), Signals: map[string]string{"weekly_quota_remaining_percent": "10"}}
+			if _, err := manager.Register(context.Background(), old); err != nil {
+				t.Fatal(err)
+			}
+			incoming := old.Clone()
+			incoming.Metadata["access_token"] = "new"
+			incoming.Quota = QuotaState{ObservedAt: time.Now(), Signals: map[string]string{"weekly_quota_remaining_percent": "90"}}
+			updated, err := manager.Update(context.Background(), incoming)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !updated.Quota.ObservedAt.Equal(incoming.Quota.ObservedAt) || updated.Quota.Signals["weekly_quota_remaining_percent"] != "90" {
+				t.Fatalf("fresh incoming observation lost: %#v", updated.Quota)
+			}
+		})
 	}
 }
 

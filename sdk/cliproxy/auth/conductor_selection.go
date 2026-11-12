@@ -2398,6 +2398,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 // SelectAuth selects one credential through the configured scheduling strategy.
 // It does not execute or alter the selected credential's result state.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	ctx = withoutQuotaProbe(ctx)
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -2414,6 +2415,7 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 // SelectAuthByKind selects one credential of the required kind through the
 // configured scheduling strategy. Credentials of other kinds are skipped.
 func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, requiredKind string, opts cliproxyexecutor.Options) (*Auth, error) {
+	ctx = withoutQuotaProbe(ctx)
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -2438,6 +2440,7 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 
 // SelectAuthWithCredentialPolicy selects one local credential allowed by a fixed policy.
 func (m *Manager) SelectAuthWithCredentialPolicy(ctx context.Context, provider, model, policy string, opts cliproxyexecutor.Options) (*Auth, error) {
+	ctx = withoutQuotaProbe(ctx)
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}

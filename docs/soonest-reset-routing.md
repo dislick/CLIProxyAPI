@@ -27,6 +27,31 @@ sessions and failover assignments use the new order. The affinity TTL refreshes
 with activity; it is not a periodic rebalance interval. Retained WebSocket turns
 continue to use their established upstream connection.
 
+## Prefer included Codex allowance before credits
+
+Give the included-allowance credential a higher priority (for example `100`) than
+the credits credential (`0`), then enable:
+
+```yaml
+routing:
+  strategy: "soonest-reset"
+  session-affinity: true
+  codex-prefer-higher-priority: true
+```
+
+Codex sessions use the highest available priority tier, including sessions that
+were previously bound to a fallback credential. The lower tier serves requests
+when the higher tier is unavailable because of quota exhaustion, outages or other
+account failures. After recovery, the next selection returns to the higher tier.
+Equal-priority accounts retain affinity and use soonest-reset for new assignments.
+This is an account priority policy; it does not detect billing plans or disable
+credits within an upstream account. Configure priority through credential settings.
+
+This option defaults to false and affects only Codex. It works with every routing
+strategy and is ignored when affinity is disabled or `session-affinity-rebind-on`
+is `never`. Retained WebSocket turns keep their established upstream connection;
+priority takes effect on the next credential selection. Home dispatch is unchanged.
+
 ## Observations and rollover
 
 Quota data is collected passively from normal upstream response headers. Routing
@@ -40,12 +65,17 @@ after a previously observed window expires may probe immediately, even if an
 earlier probe happened less than an hour before the reset. Other requests prefer
 known future resets until the next probe is due. Session affinity can retain a
 session assigned during a probe, just as it retains any other assignment.
+Token-count and selection-only requests use known ordering without consuming
+probes or establishing affinity bindings under this strategy.
 
 Snapshots are kept in memory and learned again after a restart. Disabled,
 unsupported or cooling credentials are never probed. Concurrent selections share
 probe bookkeeping, preventing a burst of refresh attempts. Stream observations
 use the time headers arrived; an older stream finishing later cannot replace a
 newer snapshot. Replacing an account clears the former account's observation.
+Partial responses that would discard a still-future reset of the scored window
+leave its snapshot and receipt time intact. Once that reset expires, an
+observation of a different window shape can replace it.
 
 ## Build and rollback
 

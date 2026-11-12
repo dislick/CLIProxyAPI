@@ -23,6 +23,17 @@ const (
 // quota observation is sent a request to learn its reset time.
 const soonestResetProbeInterval = time.Hour
 
+type quotaProbeDisabledKey struct{}
+
+// withoutQuotaProbe keeps selection-only and count-token requests from
+// consuming an observation opportunity that they cannot complete.
+func withoutQuotaProbe(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, quotaProbeDisabledKey{}, true)
+}
+
 // SoonestResetSelector selects the available credential whose longest quota
 // window resets soonest, so allowance that would otherwise expire unused at
 // the next reset is spent first. Reset times come from the passive quota
@@ -54,8 +65,11 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 
-	if probe := s.nextProbe(available, now); probe != nil {
-		return probe, nil
+	probeDisabled := ctx != nil && ctx.Value(quotaProbeDisabledKey{}) == true
+	if !probeDisabled {
+		if probe := s.nextProbe(available, now); probe != nil {
+			return probe, nil
+		}
 	}
 
 	var picked *Auth
@@ -144,17 +158,24 @@ func quotaWindowResetAt(auth *Auth, now time.Time) (time.Time, bool) {
 // leak the former provider's deadline. Codex reports a primary and an
 // optional secondary window; Claude reports unified 5h and 7d windows.
 func quotaWindowReset(auth *Auth) (time.Time, bool) {
-	if auth == nil || len(auth.Quota.Signals) == 0 {
+	if auth == nil {
 		return time.Time{}, false
 	}
-	signals := auth.Quota.Signals
+	reset, _, ok := quotaSnapshotReset(auth.Provider, auth.Quota)
+	return reset, ok
+}
+
+// quotaSnapshotReset also returns the scored window length so an incomplete
+// response cannot displace an observation of a longer quota window.
+func quotaSnapshotReset(provider string, quota QuotaState) (time.Time, int64, bool) {
+	signals := quota.Signals
 
 	var reset time.Time
-	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	longest := int64(-1)
+	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
-		longest := int64(-1)
 		for _, prefix := range codexQuotaWindowPrefixes {
-			windowReset, ok := codexWindowResetAt(signals, prefix, auth.Quota.ObservedAt)
+			windowReset, ok := codexWindowResetAt(signals, prefix, quota.ObservedAt)
 			if !ok {
 				continue
 			}
@@ -167,12 +188,14 @@ func quotaWindowReset(auth *Auth) (time.Time, bool) {
 	case "claude":
 		if parsed, ok := parseResetTimestamp(signals["Anthropic-Ratelimit-Unified-7d-Reset"]); ok {
 			reset = parsed
+			longest = 7 * 24 * 60
 		} else if parsed, ok := parseResetTimestamp(signals["Anthropic-Ratelimit-Unified-Reset"]); ok &&
-			!claudeResetIsBillingBoundary(signals, parsed, auth.Quota.ObservedAt) {
+			!claudeResetIsBillingBoundary(signals, parsed, quota.ObservedAt) {
 			reset = parsed
+			longest = 0
 		}
 	}
-	return reset, !reset.IsZero()
+	return reset, longest, !reset.IsZero()
 }
 
 func codexWindowResetAt(signals map[string]string, prefix string, observedAt time.Time) (time.Time, bool) {

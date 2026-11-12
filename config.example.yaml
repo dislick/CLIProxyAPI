@@ -225,6 +225,12 @@ routing:
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
 
+  # Return Codex sessions to the highest available priority tier after failover.
+  # Give included-quota accounts higher priority than credits accounts to prefer
+  # included allowance while retaining fallback for quota exhaustion and outages.
+  # Other providers keep normal affinity. Ignored without affinity or with rebind-on "never".
+  codex-prefer-higher-priority: false
+
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 

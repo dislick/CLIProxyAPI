@@ -543,11 +543,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		}
 		// Must follow every path above that copies existing.Quota onto auth.
 		if quotaSnapshotIsForAnotherAccount(existing, auth, credChanged && mode == updateModeReplace) {
-			// The credential may now be a different account, so the preserved
-			// passive snapshot may describe the former account's quota.
-			auth.Quota.ClearObservationSignals()
-			for _, state := range auth.ModelStates {
-				if state != nil {
+			// Clear inherited snapshots of the former account, while retaining
+			// newer observations supplied by the incoming credential (e.g. Devin).
+			if !auth.Quota.ObservedAt.After(existing.Quota.ObservedAt) {
+				auth.Quota.ClearObservationSignals()
+			}
+			for model, state := range auth.ModelStates {
+				previous := existing.ModelStates[model]
+				if state != nil && previous != nil && !state.Quota.ObservedAt.After(previous.Quota.ObservedAt) {
 					state.Quota.ClearObservationSignals()
 				}
 			}

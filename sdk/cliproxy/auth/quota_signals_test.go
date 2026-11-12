@@ -710,6 +710,52 @@ func TestObserveResponseHeadersIfNotOlderKeepsNewestSnapshot(t *testing.T) {
 	}
 }
 
+func TestObserveResponseHeadersIfNotOlderKeepsResetAcrossPartialResponses(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		for _, partial := range []string{"retry-after", "shorter window"} {
+			t.Run(provider+"/"+partial, func(t *testing.T) {
+				first := time.Unix(1790000000, 0)
+				full := http.Header{}
+				newerFull := http.Header{}
+				shorter := http.Header{}
+				if provider == "codex" {
+					full.Set("X-Codex-Secondary-Window-Minutes", "10080")
+					full.Set("X-Codex-Secondary-Reset-After-Seconds", "172800")
+					newerFull = full.Clone()
+					newerFull.Set("X-Codex-Secondary-Reset-After-Seconds", "604800")
+					shorter.Set("X-Codex-Primary-Window-Minutes", "300")
+					shorter.Set("X-Codex-Primary-Reset-After-Seconds", "3600")
+				} else {
+					full.Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(first.Add(48*time.Hour).Unix(), 10))
+					newerFull.Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(first.Add(7*24*time.Hour).Unix(), 10))
+					shorter.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(first.Add(time.Hour).Unix(), 10))
+				}
+				var quota QuotaState
+				quota.ObserveResponseHeadersForProvider(provider, full, first)
+				want, _ := quotaWindowReset(&Auth{Provider: provider, Quota: quota})
+				partialHeaders := http.Header{"Retry-After": []string{"1"}}
+				if partial == "shorter window" {
+					partialHeaders = shorter
+				}
+				quota.observeResponseHeadersIfNotOlder(provider, partialHeaders, first.Add(10*time.Minute))
+				got, ok := quotaWindowReset(&Auth{Provider: provider, Quota: quota})
+				if !ok || !got.Equal(want) || !quota.ObservedAt.Equal(first) {
+					t.Fatalf("partial response displaced reset: reset=%v observed=%v, want %v observed at %v", got, quota.ObservedAt, want, first)
+				}
+				// A complete concurrent response received between the two must still win.
+				if !quota.observeResponseHeadersIfNotOlder(provider, newerFull, first.Add(5*time.Minute)) {
+					t.Fatal("partial response prevented a newer complete observation")
+				}
+				want, _ = quotaWindowReset(&Auth{Provider: provider, Quota: quota})
+				// Once that window expires, a different quota shape can be learned.
+				if !quota.observeResponseHeadersIfNotOlder(provider, shorter, want.Add(time.Second)) {
+					t.Fatal("expired window prevented learning a changed quota shape")
+				}
+			})
+		}
+	}
+}
+
 func TestRebaseRelativeQuotaHeaders(t *testing.T) {
 	t.Parallel()
 

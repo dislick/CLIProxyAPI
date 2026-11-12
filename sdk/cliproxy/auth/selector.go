@@ -1384,12 +1384,13 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback          Selector
-	cache             *SessionCache
-	matcher           *cliproxysession.MerklePrefixMatcher
-	subagentAffinity  bool
-	rebindOnQuotaOnly bool
-	rebindOnNever     bool
+	fallback                  Selector
+	cache                     *SessionCache
+	matcher                   *cliproxysession.MerklePrefixMatcher
+	subagentAffinity          bool
+	rebindOnQuotaOnly         bool
+	rebindOnNever             bool
+	codexPreferHigherPriority bool
 }
 
 const (
@@ -1547,10 +1548,11 @@ func (s *SessionAffinitySelector) unavailableBoundAuthError(ctx context.Context,
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback         Selector
-	TTL              time.Duration
-	SubagentAffinity *bool
-	RebindOn         string
+	Fallback                  Selector
+	TTL                       time.Duration
+	SubagentAffinity          *bool
+	RebindOn                  string
+	CodexPreferHigherPriority bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1575,12 +1577,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	}
 	rebindMode := normalizeSessionAffinityRebindOn(cfg.RebindOn)
 	return &SessionAffinitySelector{
-		fallback:          cfg.Fallback,
-		cache:             NewSessionCache(cfg.TTL),
-		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
-		subagentAffinity:  subagentAffinity,
-		rebindOnQuotaOnly: rebindMode == SessionAffinityRebindOnQuota,
-		rebindOnNever:     rebindMode == SessionAffinityRebindOnNever,
+		fallback:                  cfg.Fallback,
+		cache:                     NewSessionCache(cfg.TTL),
+		matcher:                   cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		subagentAffinity:          subagentAffinity,
+		rebindOnQuotaOnly:         rebindMode == SessionAffinityRebindOnQuota,
+		rebindOnNever:             rebindMode == SessionAffinityRebindOnNever,
+		codexPreferHigherPriority: cfg.CodexPreferHigherPriority && rebindMode != SessionAffinityRebindOnNever,
 	}
 }
 
@@ -1595,10 +1598,10 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // are absolute authority. Requests without those signals use the Merkle LCP
 // matcher before retaining the legacy derived/hash fallback behavior.
 //
-// An established binding outranks credential priority: a bound credential that is still
-// available is reused even when a higher-priority credential recovers. Credential priority
-// applies to cold bindings, requests without a session, and genuine bound-credential
-// failover, so the fallback selector only ever receives the highest available priority tier.
+// An established binding normally outranks credential priority: a bound credential
+// that is still available is reused when a higher-priority credential recovers.
+// CodexPreferHigherPriority lets priority override Codex bindings. New assignments
+// and failover always use the highest available priority tier.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -1609,6 +1612,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
+	}
+	if _, soonestReset := s.fallback.(*SoonestResetSelector); soonestReset && ctx.Value(quotaProbeDisabledKey{}) == true {
+		// A preflight must not pin a new conversation before its first real
+		// request can discover an account's reset. It cannot observe quota.
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 	var reservation *weightedReservation
 	// Local bindings complete inside Pick; failed selections release speculative credit.
@@ -1675,6 +1683,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil && !s.rebindOnNever {
 		return nil, err
 	}
+	available = s.preferCodexPriority(available)
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
@@ -1824,6 +1833,31 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	return auth, nil
 }
 
+// preferCodexPriority limits affinity reuse to the best available Codex tier.
+// Other providers keep their normal affinity behaviour, including mixed pools.
+func (s *SessionAffinitySelector) preferCodexPriority(available []*Auth) []*Auth {
+	if !s.codexPreferHigherPriority {
+		return available
+	}
+	var best int
+	found := false
+	for _, auth := range available {
+		if auth != nil && strings.EqualFold(auth.Provider, "codex") && (!found || authPriority(auth) > best) {
+			best, found = authPriority(auth), true
+		}
+	}
+	if !found {
+		return available
+	}
+	filtered := make([]*Auth, 0, len(available))
+	for _, auth := range available {
+		if auth != nil && (!strings.EqualFold(auth.Provider, "codex") || authPriority(auth) == best) {
+			filtered = append(filtered, auth)
+		}
+	}
+	return filtered
+}
+
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry, reservation **weightedReservation) (*Auth, bool, error) {
 	if s == nil || s.matcher == nil {
 		return nil, false, nil
@@ -1856,6 +1890,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if errAvailable != nil && !s.rebindOnNever {
 		return nil, true, errAvailable
 	}
+	available = s.preferCodexPriority(available)
 
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {

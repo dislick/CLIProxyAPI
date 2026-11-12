@@ -103,7 +103,25 @@ func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers h
 	if q == nil || (!q.ObservedAt.IsZero() && observedAt.Before(q.ObservedAt)) {
 		return false
 	}
-	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
+	next := QuotaState{}
+	if !next.ObserveResponseHeadersForProvider(provider, headers, observedAt) {
+		if !ProviderSupportsQuotaObservation(provider) {
+			return q.ClearObservationSignals()
+		}
+		return false
+	}
+	previousReset, previousMinutes, previousOK := quotaSnapshotReset(provider, *q)
+	_, nextMinutes, nextOK := quotaSnapshotReset(provider, next)
+	if previousOK && (!nextOK || (previousReset.After(next.ObservedAt) && nextMinutes < previousMinutes)) {
+		// Keep the whole prior snapshot, including its receipt time, instead of
+		// mixing relative resets or transient flags from different responses.
+		// Advancing its timestamp would also reject a complete concurrent
+		// observation received between the original and this partial response.
+		return false
+	}
+	q.Signals = next.Signals
+	q.ObservedAt = next.ObservedAt
+	return true
 }
 
 // dropSupersededResetHeaders removes the older of a window's absolute
