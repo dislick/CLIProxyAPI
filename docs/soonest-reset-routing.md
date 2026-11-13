@@ -1,6 +1,6 @@
 # Soonest-reset routing
 
-This fork is based on CLIProxyAPI v8.0.67 and adds an opt-in native selector:
+This fork tracks CLIProxyAPI upstream and adds an opt-in native selector:
 
 ```yaml
 routing:
