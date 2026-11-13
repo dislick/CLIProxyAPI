@@ -1434,6 +1434,8 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	releaseScope := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseScope)
 	if errBind := scope.Bind(func() error {
 		close(started)
 		<-release
@@ -1443,14 +1445,15 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 
 	close(loseFirst)
+	// Watch for a drain throughout heartbeat detection and reconnect backoff.
+	// The watchdog must allow both the heartbeat timeout and maximum first retry.
 	select {
 	case <-started:
 		t.Fatal("heartbeat failover started draining the blocking scope")
-	case <-time.After(50 * time.Millisecond):
-	}
-	select {
+	case <-serviceCtx.Done():
+		t.Fatal("heartbeat failover canceled the service run before resubscribing")
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(3 * homeSubscriberRetryInitial):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
@@ -1464,12 +1467,14 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 		t.Fatal("heartbeat failover replaced the registry containing the active scope")
 	}
 	select {
+	case <-started:
+		t.Fatal("heartbeat failover started draining the blocking scope after resubscribing")
 	case <-serviceCtx.Done():
 		t.Fatal("heartbeat failover canceled the service run")
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	close(release)
+	releaseScope()
 	scope.End("test cleanup")
 }
 
