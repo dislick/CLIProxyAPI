@@ -197,12 +197,12 @@ func TestManagerSoonestResetLearnsEveryCredentialAfterRestart(t *testing.T) {
 }
 
 func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *testing.T) {
-	for _, selection := range []string{"count", "count-affinity", "count-affinity-lcp", "select", "kind", "policy"} {
+	for _, selection := range []string{"count", "count-affinity", "count-affinity-lcp", "select", "select-excluding", "kind", "policy"} {
 		t.Run(selection, func(t *testing.T) {
 			ids := []string{"soonest-reset-non-observing-a", "soonest-reset-non-observing-b"}
 			executor := &soonestResetExecutor{resets: map[string]time.Duration{ids[0]: 5 * 24 * time.Hour, ids[1]: 2 * 24 * time.Hour}}
 			manager := NewManager(nil, &SoonestResetSelector{}, nil)
-			if selection == "count-affinity" || selection == "count-affinity-lcp" {
+			if selection == "count-affinity" || selection == "count-affinity-lcp" || selection == "select-excluding" {
 				affinity := NewSessionAffinitySelector(&SoonestResetSelector{})
 				t.Cleanup(affinity.Stop)
 				manager.SetSelector(affinity)
@@ -233,6 +233,12 @@ func TestManagerSoonestResetNonObservingSelectionsLeaveProbesForExecution(t *tes
 					_, err = manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, options(i))
 				case "select":
 					_, err = manager.SelectAuth(context.Background(), "codex", model, cliproxyexecutor.Options{})
+				case "select-excluding":
+					var selected *Auth
+					selected, err = manager.SelectAuthExcluding(context.Background(), "codex", model, options(i), map[string]struct{}{ids[0]: {}})
+					if err == nil && (selected == nil || selected.ID != ids[1]) {
+						t.Fatalf("SelectAuthExcluding selected %v, want %s", selected, ids[1])
+					}
 				case "kind":
 					_, err = manager.SelectAuthByKind(context.Background(), "codex", model, "oauth", cliproxyexecutor.Options{})
 				case "policy":
@@ -302,7 +308,7 @@ func TestManagerSoonestResetNonObservingSelectionsPreserveExistingBinding(t *tes
 				}
 				execute("session-T", ids[1])
 				execute("session-S", ids[0])
-				for _, selection := range []string{"count", "select", "kind", "policy"} {
+				for _, selection := range []string{"count", "select", "select-excluding", "kind", "policy"} {
 					var selected *Auth
 					var err error
 					switch selection {
@@ -311,6 +317,8 @@ func TestManagerSoonestResetNonObservingSelectionsPreserveExistingBinding(t *tes
 						selected, _ = manager.GetByID(executor.last())
 					case "select":
 						selected, err = manager.SelectAuth(context.Background(), "codex", model, options("session-S"))
+					case "select-excluding":
+						selected, err = manager.SelectAuthExcluding(context.Background(), "codex", model, options("session-S"), map[string]struct{}{ids[1]: {}})
 					case "kind":
 						selected, err = manager.SelectAuthByKind(context.Background(), "codex", model, "oauth", options("session-S"))
 					case "policy":
