@@ -776,24 +776,28 @@ func TestConvertOpenAIResponsesRequestToAntigravity_InterruptedMessageBeforeReal
 		"stream": false
 	}`
 
-	out, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	out, err := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToAntigravity: %v", err)
+	}
 	rawRequest := ojson.GetBytesNoCopy(out, "request").Raw
 	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity interrupted message before real output request: %v; output=%s", errPair, out)
 	}
 
-	// The user message precedes the completed tool response turn
-	stopText := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.text").String()
-	if stopText != "Stop, do something else instead." {
-		t.Fatalf("unexpected text in request.contents[2]: %q", stopText)
-	}
-	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.3.parts.0.functionResponse")
+	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse")
 	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
 		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
 	}
-	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.3.parts.1.functionResponse")
+	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse")
 	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
 		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+	// Antigravity requires the grouped responses directly after the model's calls.
+	// The interrupted user message must survive as the following turn.
+	stopTurn := ojson.GetBytesNoCopy(out, "request.contents.3")
+	if stopTurn.Get("role").String() != "user" || stopTurn.Get("parts.0.text").String() != "Stop, do something else instead." {
+		t.Fatalf("unexpected deferred user turn: %s", stopTurn.Raw)
 	}
 }
 
