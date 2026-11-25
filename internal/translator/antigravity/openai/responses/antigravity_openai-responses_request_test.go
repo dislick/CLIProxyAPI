@@ -677,11 +677,11 @@ func TestConvertOpenAIResponsesRequestToAntigravity_InterruptedFunctionCallPrese
 	}
 
 	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse")
-	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.output").String() != "call interrupted, no output" {
 		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
 	}
 	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.5.parts.0.functionResponse")
-	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.output").String() != "/tmp\n" {
 		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
 	}
 }
@@ -714,11 +714,11 @@ func TestConvertOpenAIResponsesRequestToAntigravity_ParallelInterruptedFunctionC
 	}
 
 	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse")
-	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.output").String() != "call interrupted, no output" {
 		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
 	}
 	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse")
-	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.output").String() != "/tmp\n" {
 		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
 	}
 }
@@ -748,11 +748,11 @@ func TestConvertOpenAIResponsesRequestToAntigravity_TrailingPartialParallelCalls
 	}
 
 	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse")
-	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.output").String() != "call interrupted, no output" {
 		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
 	}
 	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse")
-	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.output").String() != "/tmp\n" {
 		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
 	}
 }
@@ -786,11 +786,11 @@ func TestConvertOpenAIResponsesRequestToAntigravity_InterruptedMessageBeforeReal
 	}
 
 	c1Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse")
-	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.output").String() != "call interrupted, no output" {
 		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
 	}
 	c2Resp := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse")
-	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.output").String() != "/tmp\n" {
 		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
 	}
 	// Antigravity requires the grouped responses directly after the model's calls.
@@ -913,6 +913,7 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearch(t *testing.T) {
 
 	input := []byte(`{
 		"model": "` + capableModel + `",
+		"instructions": "Answer in metric units.",
 		"input": "What is the newest Go release?",
 		"tools": [{
 			"type": "web_search",
@@ -927,6 +928,10 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearch(t *testing.T) {
 
 	if parsed.Get("requestType").String() != "web_search" {
 		t.Fatalf("expected requestType web_search, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+	parts := parsed.Get("request.systemInstruction.parts").Array()
+	if len(parts) != 1 || parts[0].Get("text").String() != "Answer in metric units.\n\n"+antigravityWebSearchSystemInstruction {
+		t.Fatalf("system instruction was not merged into one part: %s", parsed.Get("request.systemInstruction").Raw)
 	}
 	if query := parsed.Get("request.contents.0.parts.0.text").String(); query != "What is the newest Go release?" {
 		t.Fatalf("expected query 'What is the newest Go release?', got %q", query)
@@ -1273,7 +1278,7 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchPreservesInstructio
 
 	foundUserInstructions := false
 	for _, part := range parsed.Get("request.systemInstruction.parts").Array() {
-		if part.Get("text").String() == userInstructions {
+		if strings.Contains(part.Get("text").String(), userInstructions) {
 			foundUserInstructions = true
 			break
 		}
@@ -1330,7 +1335,7 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceAutoPrese
 
 	foundUserInstructions := false
 	for _, part := range parsed.Get("request.systemInstruction.parts").Array() {
-		if part.Get("text").String() == "Keep answers concise." {
+		if strings.Contains(part.Get("text").String(), "Keep answers concise.") {
 			foundUserInstructions = true
 			break
 		}
