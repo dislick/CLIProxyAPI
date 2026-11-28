@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -297,13 +298,26 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && openAICompatMatchesAuth(indexed.Name, indexed.BaseURL, compatName, a) && registerCompat(indexed) {
 				return published
 			}
-			for i := range cfg.OpenAICompatibility {
-				compat := &cfg.OpenAICompatibility[i]
-				if strings.EqualFold(compat.Name, compatName) && registerCompat(compat) {
-					return published
+			var attrBase string
+			if a.Attributes != nil {
+				attrBase = strings.TrimSpace(a.Attributes["base_url"])
+			}
+			if attrBase != "" {
+				for i := range cfg.OpenAICompatibility {
+					compat := &cfg.OpenAICompatibility[i]
+					if openAICompatMatchesAuth(compat.Name, compat.BaseURL, compatName, a) && registerCompat(compat) {
+						return published
+					}
+				}
+			} else {
+				for i := range cfg.OpenAICompatibility {
+					compat := &cfg.OpenAICompatibility[i]
+					if strings.EqualFold(strings.TrimSpace(compat.Name), strings.TrimSpace(compatName)) && registerCompat(compat) {
+						return published
+					}
 				}
 			}
 			if isCompatAuth {
@@ -440,6 +454,86 @@ func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
 	return &entries[index]
 }
 
+func authHasConfigIndex(auth *coreauth.Auth) bool {
+	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig || auth.Attributes == nil {
+		return false
+	}
+	return strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]) != ""
+}
+
+func authAPIKeyCredentials(auth *coreauth.Auth) (apiKey, baseURL string) {
+	if auth == nil || auth.Attributes == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
+}
+
+func configBaseURLsEqual(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	parsedA, errA := url.Parse(a)
+	parsedB, errB := url.Parse(b)
+	if errA != nil || errB != nil || parsedA.Scheme == "" || parsedB.Scheme == "" || parsedA.Host == "" || parsedB.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsedA.Scheme, parsedB.Scheme) &&
+		strings.EqualFold(parsedA.Host, parsedB.Host) &&
+		parsedA.User.String() == parsedB.User.String() &&
+		parsedA.EscapedPath() == parsedB.EscapedPath() &&
+		parsedA.ForceQuery == parsedB.ForceQuery &&
+		parsedA.RawQuery == parsedB.RawQuery &&
+		parsedA.Fragment == parsedB.Fragment
+}
+
+func configAPIKeyMatchesConfigAuth(cfgKey, cfgBase, attrKey, attrBase string) bool {
+	cfgKey = strings.TrimSpace(cfgKey)
+	cfgBase = strings.TrimSpace(cfgBase)
+	if attrKey == "" && attrBase == "" {
+		return false
+	}
+	return cfgKey == attrKey && configBaseURLsEqual(cfgBase, attrBase)
+}
+
+func configAPIKeyMatchesLegacyAuth(cfgKey, cfgBase, attrKey, attrBase string) bool {
+	cfgKey = strings.TrimSpace(cfgKey)
+	cfgBase = strings.TrimSpace(cfgBase)
+	if attrKey != "" && attrBase != "" {
+		return cfgKey == attrKey && configBaseURLsEqual(cfgBase, attrBase)
+	}
+	if attrKey != "" {
+		return cfgKey == attrKey && cfgBase == ""
+	}
+	return attrBase != "" && configBaseURLsEqual(cfgBase, attrBase)
+}
+
+func openAICompatMatchesAuth(entryName, entryBaseURL, expectedName string, auth *coreauth.Auth) bool {
+	entryName = strings.TrimSpace(entryName)
+	expectedName = strings.TrimSpace(expectedName)
+	var attrBase string
+	if auth != nil && auth.Attributes != nil {
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	nameMatches := false
+	if entryName != "" && expectedName != "" {
+		nameMatches = strings.EqualFold(entryName, expectedName)
+	} else if entryName == "" && (expectedName == "" || strings.EqualFold(expectedName, "openai-compatibility")) {
+		nameMatches = attrBase != ""
+	}
+	if !nameMatches {
+		return false
+	}
+	if attrBase != "" {
+		return configBaseURLsEqual(entryBaseURL, attrBase)
+	}
+	return true
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	return resolveConfigClaudeKeyForConfig(s.currentConfig(), auth)
 }
@@ -448,37 +542,29 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
 		}
 	}
 	if attrKey != "" {
 		for i := range cfg.ClaudeKey {
 			entry := &cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+			if strings.TrimSpace(entry.APIKey) == attrKey {
 				return entry
 			}
 		}
@@ -516,26 +602,31 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, entries); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range entries {
+			entry := &entries[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range entries {
 		entry := &entries[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.TrimSpace(entry.APIKey) == attrKey && strings.TrimSpace(entry.BaseURL) == "" {
 				return entry
 			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
 		}
 	}
 	return nil
@@ -549,32 +640,29 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range cfg.VertexCompatAPIKey {
+			entry := &cfg.VertexCompatAPIKey[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range cfg.VertexCompatAPIKey {
 		entry := &cfg.VertexCompatAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
 		}
 	}
 	if attrKey != "" {
 		for i := range cfg.VertexCompatAPIKey {
 			entry := &cfg.VertexCompatAPIKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+			if strings.TrimSpace(entry.APIKey) == attrKey {
 				return entry
 			}
 		}
@@ -590,7 +678,7 @@ func resolveConfigCodexKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *co
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.CodexKey, true)
+	return resolveConfigCodexStyleKey(auth, cfg.CodexKey)
 }
 
 func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
@@ -601,7 +689,7 @@ func resolveConfigXAIKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *conf
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.XAIKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.XAIKey)
 }
 
 func (s *Service) resolveConfigMetaKey(auth *coreauth.Auth) *config.MetaKey {
@@ -612,35 +700,38 @@ func resolveConfigMetaKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *con
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.MetaKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.MetaKey)
 }
 
-func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
 	if auth == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	matchesCredentials := func(entry *config.CodexKey) bool {
-		if entry == nil {
-			return false
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, entries); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
 		}
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" {
-			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+		for i := range entries {
+			entry := &entries[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
 		}
-		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
-	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
-		return entry
+		return nil
 	}
 	for i := range entries {
-		if entry := &entries[i]; matchesCredentials(entry) {
+		entry := &entries[i]
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.TrimSpace(entry.APIKey) == attrKey && strings.TrimSpace(entry.BaseURL) == "" {
+				return entry
+			}
 		}
 	}
 	return nil
@@ -738,7 +829,7 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		sourceID := strings.ToLower(strings.TrimSpace(model.SourceModelID))
 		blocked := false
 		for _, pattern := range patterns {
-			if matchWildcard(pattern, modelID) || (sourceID != "" && sourceID != modelID && matchWildcard(pattern, sourceID)) {
+			if modelconfig.MatchExcludedModelPattern(pattern, modelID) || (sourceID != "" && sourceID != modelID && modelconfig.MatchExcludedModelPattern(pattern, sourceID)) {
 				blocked = true
 				break
 			}
@@ -824,50 +915,6 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		addModel(&clone)
 	}
 	return out
-}
-
-// matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
-func matchWildcard(pattern, value string) bool {
-	if pattern == "" {
-		return false
-	}
-
-	// Fast path for exact match (no wildcard present).
-	if !strings.Contains(pattern, "*") {
-		return pattern == value
-	}
-
-	parts := strings.Split(pattern, "*")
-	// Handle prefix.
-	if prefix := parts[0]; prefix != "" {
-		if !strings.HasPrefix(value, prefix) {
-			return false
-		}
-		value = value[len(prefix):]
-	}
-
-	// Handle suffix.
-	if suffix := parts[len(parts)-1]; suffix != "" {
-		if !strings.HasSuffix(value, suffix) {
-			return false
-		}
-		value = value[:len(value)-len(suffix)]
-	}
-
-	// Handle middle segments in order.
-	for i := 1; i < len(parts)-1; i++ {
-		segment := parts[i]
-		if segment == "" {
-			continue
-		}
-		idx := strings.Index(value, segment)
-		if idx < 0 {
-			return false
-		}
-		value = value[idx+len(segment):]
-	}
-
-	return true
 }
 
 type modelEntry interface {

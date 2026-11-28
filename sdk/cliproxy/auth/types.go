@@ -137,7 +137,8 @@ type Auth struct {
 	AdoptedAt time.Time `json:"-"`
 	// AdoptedGrantHash records the fingerprint of the credential grant when it was adopted into runtime state,
 	// preserved across upstream automatic refresh rotations and reset when the credential grant is externally replaced.
-	AdoptedGrantHash string `json:"-"`
+	AdoptedGrantHash            string `json:"-"`
+	antigravityEnumRegistration string
 	// InferenceVerified reports whether the current credential version completed a real inference response.
 	InferenceVerified bool `json:"-"`
 	// LastInferenceVerifiedAt records when the current credential version last completed an inference response.
@@ -412,11 +413,12 @@ type ModelState struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq     uint64    `json:"-"`
-	forceCooldownUntil      time.Time `json:"-"`
-	quotaForceCooldownUntil time.Time `json:"-"`
-	nonQuotaCooldownUntil   time.Time `json:"-"`
-	forceCooldownSeeded     bool      `json:"-"`
+	cooldownRecordedSeq      uint64    `json:"-"`
+	forceCooldownUntil       time.Time `json:"-"`
+	quotaForceCooldownUntil  time.Time `json:"-"`
+	nonQuotaCooldownUntil    time.Time `json:"-"`
+	nonCapacityCooldownUntil time.Time `json:"-"`
+	forceCooldownSeeded      bool      `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop
@@ -1022,7 +1024,9 @@ func IsCodexClientUserAgent(userAgent string) bool {
 		strings.Contains(ua, "codex-rs") ||
 		strings.Contains(ua, "codex_cli_rs") ||
 		strings.Contains(ua, "codex-tui") ||
-		strings.Contains(ua, "codex_exec")
+		strings.Contains(ua, "codex_exec") ||
+		strings.Contains(ua, "codex-acp") ||
+		strings.Contains(ua, "codex_acp")
 }
 
 func headerValueFromHTTPHeader(headers http.Header, name string) string {

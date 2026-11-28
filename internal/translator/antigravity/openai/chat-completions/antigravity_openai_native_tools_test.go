@@ -9,39 +9,52 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-func TestOpenAIToAntigravityMixedNativeToolsPreserveOnlyFunctions(t *testing.T) {
-	for _, nativeTool := range []struct {
-		name  string
-		input string
-		path  string
-	}{
-		{name: "google search", input: `{"google_search":{}}`, path: "googleSearch"},
-		{name: "code execution", input: `{"code_execution":{}}`, path: "codeExecution"},
-		{name: "url context", input: `{"url_context":{}}`, path: "urlContext"},
-	} {
-		t.Run(nativeTool.name, func(t *testing.T) {
-			input := []byte(`{
-                "model":"gemini-4-neon-xhigh",
-                "messages":[{"role":"user","content":"hi"}],
-                "tools":[
-                    {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}},
-                    ` + nativeTool.input + `
-                ]
-            }`)
+func TestOpenAIToAntigravityMixedGoogleSearchPreservesOnlyFunctions(t *testing.T) {
+	input := []byte(`{
+        "model":"gemini-4-neon-xhigh",
+        "messages":[{"role":"user","content":"hi"}],
+        "tools":[
+            {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}},
+            {"google_search":{}}
+        ]
+    }`)
 
-			out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
-			if err != nil {
-				t.Fatalf("convert error: %v", err)
-			}
-			if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"get_weather\")").Raw; got == "" {
-				t.Fatalf("function declaration was not preserved: %s", out)
-			}
-			for _, tool := range ojson.GetBytesNoCopy(out, "request.tools").Array() {
-				if tool.Get(nativeTool.path).Exists() {
-					t.Fatalf("native %s tool was mixed with function declarations: %s", nativeTool.path, out)
-				}
-			}
-		})
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"get_weather\")").Raw; got == "" {
+		t.Fatalf("function declaration was not preserved: %s", out)
+	}
+	for _, tool := range ojson.GetBytesNoCopy(out, "request.tools").Array() {
+		if tool.Get("googleSearch").Exists() {
+			t.Fatalf("googleSearch was mixed with function declarations: %s", out)
+		}
+	}
+}
+
+func TestOpenAIToAntigravityMixedFunctionAndNativeToolsPreserveAllTools(t *testing.T) {
+	input := []byte(`{
+        "model":"gemini-4-neon-xhigh",
+        "messages":[{"role":"user","content":"run a search after checking ping"}],
+        "tools":[
+            {"type":"function","function":{"name":"ping","parameters":{"type":"object","properties":{}}}},
+            {"code_execution":{}},
+            {"url_context":{}}
+        ]
+    }`)
+
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"ping\")").Raw; got == "" {
+		t.Fatalf("function declaration was not preserved: %s", out)
+	}
+	for _, path := range []string{"codeExecution", "urlContext"} {
+		if got := ojson.GetBytesNoCopy(out, "request.tools.#("+path+")").Raw; got == "" {
+			t.Fatalf("native %s tool was not preserved: %s", path, out)
+		}
 	}
 }
 
@@ -75,7 +88,7 @@ func TestOpenAIToAntigravitySearchOnlyUsesDedicatedEnvelopeWhenSupported(t *test
 		t.Fatalf("included domain = %q, want go.dev: %s", got, envelope.Body)
 	}
 	parts := ojson.GetBytesNoCopy(envelope.Body, "request.systemInstruction.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "Answer in metric units." || parts[1].Get("text").String() != antigravityOpenAIWebSearchSystemInstruction {
+	if len(parts) != 1 || parts[0].Get("text").String() != "Answer in metric units.\n\n"+antigravityOpenAIWebSearchSystemInstruction {
 		t.Fatalf("system instructions were not preserved and appended: %s", envelope.Body)
 	}
 }
@@ -269,5 +282,110 @@ func TestOpenAIToAntigravityStandaloneNativeToolsRemainAvailable(t *testing.T) {
 				t.Fatalf("standalone native tool was removed: %s", out)
 			}
 		})
+	}
+}
+
+func TestOpenAIToAntigravitySearchOnlyAllowsNullToolChoice(t *testing.T) {
+	const model = "issue-8115-search-null-choice"
+	input := []byte(`{
+		"model":"` + model + `",
+		"messages":[{"role":"user","content":"latest Go release"}],
+		"tools":[{"google_search":{}}],
+		"tool_choice":null
+	}`)
+	envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format:    sdktranslator.FormatOpenAI,
+		Model:     model,
+		Body:      input,
+		ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+	})
+	if envelope.Err != nil {
+		t.Fatalf("convert error: %v", envelope.Err)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, envelope.Body)
+	}
+	if !ojson.GetBytesNoCopy(envelope.Body, "request.tools.0.googleSearch").Exists() {
+		t.Fatalf("dedicated search envelope is missing googleSearch: %s", envelope.Body)
+	}
+}
+
+func TestOpenAIToAntigravitySearchOnlyAllowedToolsToolChoice(t *testing.T) {
+	const model = "issue-8115-search-allowed-tools"
+	tests := []struct {
+		name       string
+		toolChoice string
+		wantSearch bool
+	}{
+		{
+			name:       "allowed_tools listing google_search permits search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"google_search"}]}}`,
+			wantSearch: true,
+		},
+		{
+			name:       "allowed_tools with none mode disables search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"none","tools":[{"type":"google_search"}]}}`,
+			wantSearch: false,
+		},
+		{
+			name:       "allowed_tools listing only function disables search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"lookup"}}]}}`,
+			wantSearch: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"latest Go release"}],"tools":[{"google_search":{}}],"tool_choice":` + tt.toolChoice + `}`)
+			envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+				Format:    sdktranslator.FormatOpenAI,
+				Model:     model,
+				Body:      input,
+				ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+			})
+			if envelope.Err != nil {
+				t.Fatalf("convert error: %v", envelope.Err)
+			}
+			gotSearch := ojson.GetBytesNoCopy(envelope.Body, "requestType").String() == "web_search"
+			if gotSearch != tt.wantSearch {
+				t.Fatalf("web_search = %t, want %t: %s", gotSearch, tt.wantSearch, envelope.Body)
+			}
+		})
+	}
+}
+
+func TestOpenAIToAntigravityMixedToolsAllowedToolsOnlySearchUsesDedicatedEnvelope(t *testing.T) {
+	const model = "issue-8115-mixed-allowed-search"
+	input := []byte(`{
+		"model":"` + model + `",
+		"messages":[{"role":"user","content":"latest Go release"}],
+		"tools":[
+			{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{}}}},
+			{"google_search":{"includedDomains":["go.dev"]}}
+		],
+		"tool_choice":{
+			"type":"allowed_tools",
+			"allowed_tools":{
+				"mode":"auto",
+				"tools":[{"type":"google_search"}]
+			}
+		}
+	}`)
+	envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format:    sdktranslator.FormatOpenAI,
+		Model:     model,
+		Body:      input,
+		ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+	})
+	if envelope.Err != nil {
+		t.Fatalf("convert error: %v", envelope.Err)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, envelope.Body)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.tools.0.googleSearch.includedDomains.0").String(); got != "go.dev" {
+		t.Fatalf("included domain = %q, want go.dev: %s", got, envelope.Body)
+	}
+	if ojson.GetBytesNoCopy(envelope.Body, "request.tools.#(functionDeclarations)").Exists() {
+		t.Fatalf("disallowed functionDeclarations survived search envelope: %s", envelope.Body)
 	}
 }

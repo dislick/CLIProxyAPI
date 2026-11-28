@@ -483,8 +483,10 @@ upstream:
     # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
     # right after those handshake events, instead of returning 503 on the wire. Buffering them
     # keeps the downstream response headers uncommitted long enough to transparently retry on
-    # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
-    # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
+    # another credential. Only overload/rate-limit rejections and structured billing quota exhaustion
+    # (`insufficient_quota` / `credit_balance_exhausted`) trigger failover while the bootstrap window
+    # is still uncommitted; every other terminal failure, and any error after output/tool events commit
+    # the stream, is still delivered in-stream with no replay. One pre-existing behaviour is worth
     # knowing, because this option makes the window it lives in much longer: if the stream ends while
     # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
     # whether another credential is then tried depends on how it ended. A clean end with no terminal
@@ -763,6 +765,11 @@ upstream:
 #       prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #       disable-cooling: false                       # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3                             # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       request-scoped-errors:                       # optional: custom rules to classify upstream errors by status and body patterns
+#         - status: 400
+#           match:
+#             - "invalid_argument"
+#           action: "stop"
 #       base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #       proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
@@ -1096,7 +1103,7 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
-  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, copilot, and devin.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
   # client-visible names can become ambiguous across providers. For strict backend pinning, use
@@ -1149,13 +1156,16 @@ oauth:
   #   copilot:
   #     - name: "copilot/claude-sonnet-5" # use the listed Copilot model ID, before any auth prefix
   #       alias: "copilot-sonnet" # published verbatim; no automatic copilot/ prefix
+  #   devin:
+  #     - name: "devin/claude-fable-5-1" # use the listed Devin model ID, before any auth prefix
+  #       alias: "devin-fable"
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
 
   # OAuth provider model settings (per channel)
   # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
-  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, copilot, and devin.
   # settings:
   #   copilot:
   #     - name: "copilot/gpt-5.3-codex" # canonical source ID, shared by its aliases
@@ -1194,6 +1204,8 @@ oauth:
   #     - "muse-spark-1.1"
   #   copilot:
   #     - "copilot/claude-haiku-*" # match Copilot model IDs before aliases and auth prefixes
+  #   devin:
+  #     - "devin/swe-2-flash" # match Devin model IDs before aliases and auth prefixes
 
   # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
   # request-scoped-errors:
